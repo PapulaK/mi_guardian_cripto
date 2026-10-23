@@ -4,6 +4,7 @@ import hmac
 import hashlib
 import sqlite3
 import requests
+import threading
 import numpy as np
 from flask import Flask, jsonify, request, render_template_string
 from urllib.parse import urlencode
@@ -11,18 +12,18 @@ from urllib.parse import urlencode
 app = Flask(__name__)
 
 # =====================================================================
-# ⚙️ CONFIGURACIÓN DE ENTORNO Y BASE DE DATOS (RENDER COMPATIBLE)
+# ⚙️ CONFIGURACIÓN DE ENTORNO Y CONTEXTO DEL SISTEMA
 # =====================================================================
 BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY", "")
 BINANCE_SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY", "")
 TRADING_MODE = os.environ.get("TRADING_MODE", "PAPER")  # 'PAPER' o 'REAL'
-BINANCE_FUTURES_URL = "https://binance.com"
+ACTIVO_PRINCIPAL = os.environ.get("ACTIVO_PRINCIPAL", "SOLUSDT").upper()
 
-# Ruta temporal compartida para bypass de solo lectura en Render Free Tier
+BINANCE_FUTURES_URL = "https://binance.com"
 DB_PATH = "/tmp/estadisticas_trading.db"
 
 def init_db():
-    """Inicializa la base de datos local en el directorio /tmp."""
+    """Inicializa la base de datos local de alta velocidad en memoria temporal."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
@@ -43,35 +44,31 @@ def init_db():
 init_db()
 
 # =====================================================================
-# 🔑 MÓDULO DE EJECUCIÓN REAL (CRIPTO-FIRMADO)
+# 🔑 MÓDULO DE FIRMA CRIPTO-SEGURA (API BINANCE)
 # =====================================================================
 def firmar_peticion(params):
-    """Genera la firma HMAC-SHA256 obligatoria para la API de Binance."""
+    """Genera la firma digital HMAC-SHA256 obligatoria para peticiones privadas."""
     query_string = urlencode(params)
-    signature = hmac.new(
+    return hmac.new(
         BINANCE_SECRET_KEY.encode('utf-8'),
         query_string.encode('utf-8'),
         hashlib.sha256
     ).hexdigest()
-    return signature
 
 def enviar_orden_binance(symbol, side, quantity):
-    """Envía una orden de mercado real a Binance Futuros."""
+    """Ejecuta una orden de mercado real en Binance Futuros."""
     if TRADING_MODE != "REAL":
-        return {"status": "SUCCESS_PAPER", "msg": "Modo Paper Trading Activo"}
+        return {"status": "SUCCESS_PAPER", "orderId": f"mock_{int(time.time())}"}
         
     endpoint = f"{BINANCE_FUTURES_URL}/fapi/v1/order"
-    timestamp = int(time.time() * 1000)
-    
     params = {
         "symbol": symbol.upper(),
-        "side": side.upper(),       # 'BUY' (Long) o 'SELL' (Short)
+        "side": side.upper(),       # 'BUY' o 'SELL'
         "type": "MARKET",
         "quantity": quantity,
-        "timestamp": timestamp,
-        "recvWindow": 6000          # Tolerancia para latencia de Render
+        "timestamp": int(time.time() * 1000),
+        "recvWindow": 6000
     }
-    
     params["signature"] = firmar_peticion(params)
     headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
     
@@ -82,157 +79,144 @@ def enviar_orden_binance(symbol, side, quantity):
         return {"status": "ERROR", "msg": str(e)}
 
 # =====================================================================
-# 🧮 MOTOR DE BACKTESTING HISTÓRICO INTEGRADO (LÓGICA NIVEL 9.2)
+# 🧮 MOTOR CUANTITATIVO 9.2 EN TIEMPO REAL (HISTORAL COMPLETO)
 # =====================================================================
-@app.route('/api/backtest', methods=['POST'])
-def ejecutar_backtest():
-    """
-    Ejecuta un backtesting histórico usando la estrategia cuantitativa 9.2.
-    JSON esperado: { "symbol": "SOLUSDT", "capital": 1000 }
-    """
-    data = request.get_json() or {}
-    symbol = data.get("symbol", "SOLUSDT").upper()
-    capital_inicial = float(data.get("capital", 1000.0))
-    
-    # Descarga de datos históricos (15m para el activo desde la API pública)
-    url = f"{BINANCE_FUTURES_URL}/fapi/v1/klines"
-    params = {"symbol": symbol, "interval": "15m", "limit": 1500}
-    
-    res = requests.get(url, params=params, timeout=10)
-    if res.status_code != 200:
-        return jsonify({"error": "No se pudieron obtener datos históricos de Binance"}), 400
+def procesar_logica_cuantitativa():
+    """Descarga datos actuales, calcula indicadores y toma decisiones autónomas."""
+    try:
+        # 1. Obtener Klines de 15m para el activo principal
+        url = f"{BINANCE_FUTURES_URL}/fapi/v1/klines"
+        params = {"symbol": ACTIVO_PRINCIPAL, "interval": "15m", "limit": 100}
+        res = requests.get(url, params=params, timeout=8)
+        if res.status_code != 200: return
         
-    klines = res.json()
-    
-    # Mapeo de vectores para cálculos estadísticos con NumPy
-    precios_cierre = np.array([float(k[4]) for k in klines])
-    volumenes = np.array([float(k[5]) for k in klines])
-    highs = np.array([float(k[2]) for k in klines])
-    lows = np.array([float(k[3]) for k in klines])
-    
-    trades_ganados = 0
-    trades_perdidos = 0
-    beneficio_total = 0.0
-    posicion_abierta = False
-    precio_entrada = 0.0
-    tp_precio = 0.0
-    sl_precio = 0.0
-    tipo_posicion = ""
-    
-    # Bucle cuantitativo iterativo (Ventana mínima de 20 periodos)
-    for i in range(20, len(precios_cierre) - 1):
-        close_actual = precios_cierre[i]
-        vol_actual = volumenes[i]
+        klines = res.json()
+        precios_cierre = np.array([float(k[4]) for k in klines])
+        volumenes = np.array([float(k[5]) for k in klines])
+        highs = np.array([float(k[2]) for k in klines])
+        lows = np.array([float(k[3]) for k in klines])
         
-        # Filtro Bollinger 20, 2.0
-        ventana_close = precios_cierre[i-20:i]
-        ma20 = np.mean(ventana_close)
-        std20 = np.std(ventana_close)
+        close_actual = precios_cierre[-1]
+        vol_actual = volumenes[-1]
+        
+        # 2. Obtener macro tendencia Beta de Bitcoin (BTC 1H contra su MA20)
+        params_btc = {"symbol": "BTCUSDT", "interval": "1h", "limit": 21}
+        res_btc = requests.get(url, params=params_btc, timeout=8)
+        btc_alcista = True
+        if res_btc.status_code == 200:
+            klines_btc = res_btc.json()
+            cierres_btc = np.array([float(k[4]) for k in klines_btc])
+            btc_alcista = cierres_btc[-1] > np.mean(cierres_btc[:-1])
+
+        # 3. Cálculos Estadísticos Avanzados (Bollinger, Z-Score, ATR)
+        ma20 = np.mean(precios_cierre[-21:-1])
+        std20 = np.std(precios_cierre[-21:-1])
         banda_sup = ma20 + (2.0 * std20)
         banda_inf = ma20 - (2.0 * std20)
         
-        # Filtro de Liquidez (Z-Score de Volumen)
-        ventana_vol = volumenes[i-20:i]
-        ma_vol = np.mean(ventana_vol)
-        std_vol = np.std(ventana_vol)
+        ma_vol = np.mean(volumenes[-21:-1])
+        std_vol = np.std(volumenes[-21:-1])
         z_score_vol = (vol_actual - ma_vol) / std_vol if std_vol > 0 else 0
         
-        # Filtro de Riesgo (ATR 14 simplificado)
-        atr_14 = np.mean(highs[i-14:i] - lows[i-14:i]) 
+        atr_14 = np.mean(highs[-15:-1] - lows[-15:-1])
+
+        # 4. Auditoría de Estados y Verificación de Operaciones en DB
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, tipo_posicion, precio_entrada, tp_precio, sl_precio FROM operaciones WHERE estado='ABIERTA' AND symbol=?", (ACTIVO_PRINCIPAL,))
+        posicion_activa = cursor.fetchone()
         
-        if not posicion_abierta:
-            # Entrada por ruptura confirmada con volumen (Z-Score > 1.5)
-            if close_actual >= banda_sup and z_score_vol > 1.5:
-                posicion_abierta = True
-                precio_entrada = close_actual
-                tp_precio = precio_entrada + (3.0 * atr_14)
-                sl_precio = precio_entrada - (1.5 * atr_14)
-                tipo_posicion = "LONG"
+        if not posicion_activa:
+            # LÓGICA DE ENTRADA CON CONFIRMACIÓN MACRO BETA
+            if close_actual >= banda_sup and z_score_vol > 1.5 and btc_alcista:
+                # Disparar LONG
+                tp = close_actual + (3.0 * atr_14)
+                sl = close_actual - (1.5 * atr_14)
+                enviar_orden_binance(ACTIVO_PRINCIPAL, "BUY", 1.0) # Ajustar cantidad según riesgo
+                cursor.execute("INSERT INTO operaciones (symbol, tipo_posicion, precio_entrada, tp_precio, sl_precio, estado, timestamp) VALUES (?, 'LONG', ?, ?, ?, 'ABIERTA', ?)",
+                               (ACTIVO_PRINCIPAL, close_actual, tp, sl, int(time.time())))
                 
-            elif close_actual <= banda_inf and z_score_vol > 1.5:
-                posicion_abierta = True
-                precio_entrada = close_actual
-                tp_precio = precio_entrada - (3.0 * atr_14)
-                sl_precio = precio_entrada + (1.5 * atr_14)
-                tipo_posicion = "SHORT"
-                
+            elif close_actual <= banda_inf and z_score_vol > 1.5 and not btc_alcista:
+                # Disparar SHORT
+                tp = close_actual - (3.0 * atr_14)
+                sl = close_actual + (1.5 * atr_14)
+                enviar_orden_binance(ACTIVO_PRINCIPAL, "SELL", 1.0)
+                cursor.execute("INSERT INTO operaciones (symbol, tipo_posicion, precio_entrada, tp_precio, sl_precio, estado, timestamp) VALUES (?, 'SHORT', ?, ?, ?, 'ABIERTA', ?)",
+                               (ACTIVO_PRINCIPAL, close_actual, tp, sl, int(time.time())))
         else:
-            # Auditoría de salida (TP 3.0x ATR vs SL 1.5x ATR)
-            high_actual = highs[i]
-            low_actual = lows[i]
-            
-            if tipo_posicion == "LONG":
-                if high_actual >= tp_precio:
-                    trades_ganados += 1
-                    beneficio_total += (tp_precio - precio_entrada)
-                    posicion_abierta = False
-                elif low_actual <= sl_precio:
-                    trades_perdidos += 1
-                    beneficio_total += (sl_precio - precio_entrada)
-                    posicion_abierta = False
+            # LÓGICA ROBÓTICA DE SALIDA (AUDITORÍA DE PRECIO SPOT CONTRA OBJETIVOS)
+            id_op, tipo, entrada, tp, sl = posicion_activa
+            if tipo == "LONG":
+                if close_actual >= tp:
+                    enviar_orden_binance(ACTIVO_PRINCIPAL, "SELL", 1.0)
+                    cursor.execute("UPDATE operaciones SET estado='GANADA' WHERE id=?", (id_op,))
+                elif close_actual <= sl:
+                    enviar_orden_binance(ACTIVO_PRINCIPAL, "SELL", 1.0)
+                    cursor.execute("UPDATE operaciones SET estado='PERDIDA' WHERE id=?", (id_op,))
+            elif tipo == "SHORT":
+                if close_actual <= tp:
+                    enviar_orden_binance(ACTIVO_PRINCIPAL, "BUY", 1.0)
+                    cursor.execute("UPDATE operaciones SET estado='GANADA' WHERE id=?", (id_op,))
+                elif close_actual >= sl:
+                    enviar_orden_binance(ACTIVO_PRINCIPAL, "BUY", 1.0)
+                    cursor.execute("UPDATE operaciones SET estado='PERDIDA' WHERE id=?", (id_op,))
                     
-            elif tipo_posicion == "SHORT":
-                if low_actual <= tp_precio:
-                    trades_ganados += 1
-                    beneficio_total += (precio_entrada - tp_precio)
-                    posicion_abierta = False
-                elif high_actual >= sl_precio:
-                    trades_perdidos += 1
-                    beneficio_total += (precio_entrada - sl_precio)
-                    posicion_abierta = False
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Error en bucle cuantitativo: {e}")
 
-    total_trades = trades_ganados + trades_perdidos
-    win_rate = (trades_ganados / total_trades * 100) if total_trades > 0 else 0
-    profit_factor = (trades_ganados * 3.0) / (trades_perdidos * 1.5) if trades_perdidos > 0 else trades_ganados
+# =====================================================================
+# 🔁 DEMONIO ASÍNCRONO DE FONDO (DAEMON THREAD PERPETUO)
+# =====================================================================
+def background_loop_perpetuo():
+    """Corre de forma autónoma e independiente en el servidor de Render."""
+    print("🤖 Servomotor Cuantitativo de Fondo Iniciado Correctamente.")
+    while True:
+        procesar_logica_cuantitativa()
+        time.sleep(10) # Intervalo estricto de escaneo y auditoría
+
+# Lanzamiento seguro del hilo de fondo antes de levantar la interfaz web
+t = threading.Thread(target=background_loop_perpetuo, daemon=True)
+t.start()
+
+# =====================================================================
+# 📊 MOTOR DE BACKTESTING HISTÓRICO INTEGRADO
+# =====================================================================
+@app.route('/api/backtest', methods=['POST'])
+def ejecutar_backtest():
+    data = request.get_json() or {}
+    symbol = data.get("symbol", ACTIVO_PRINCIPAL).upper()
+    capital_inicial = float(data.get("capital", 1000.0))
     
-    return jsonify({
-        "status": "BACKTEST_COMPLETED",
-        "activo": symbol,
-        "trading_mode_actual": TRADING_MODE,
-        "total_operaciones": total_trades,
-        "ganadas": trades_ganados,
-        "perdidas": trades_perdidos,
-        "win_rate_porcentaje": round(win_rate, 2),
-        "profit_factor_teorico": round(profit_factor, 2),
-        "balance_final_estimado": round(capital_inicial + (beneficio_total * (capital_inicial * 0.01)), 2)
-    })
-
-# =====================================================================
-# 📊 INTERFAZ DE AUDITORÍA Y PANEL WEB PREMIUM (CELULAR)
-# =====================================================================
-@app.route('/')
-def dashboard():
-    """Panel de control optimizado para navegadores móviles con KPIs en vivo."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT symbol, tipo_posicion, precio_entrada, tp_precio, sl_precio, estado FROM operaciones ORDER BY id DESC")
-    rows = cursor.fetchall()
-    conn.close()
-
-    # Cálculo dinámico de métricas para la barra superior
-    ganadas = sum(1 for r in rows if r[5] == "GANADA")
-    perdidas = sum(1 for r in rows if r[5] == "PERDIDA")
-    activas = sum(1 for r in rows if r[5] == "ABIERTA")
-    total = ganadas + perdidas
-    win_rate = round((ganadas / total * 100), 1) if total > 0 else 0.0
-    profit_factor = round((ganadas * 3.0) / (perdidas * 1.5), 2) if perdidas > 0 else ganadas
-
-    # HTML Puro inyectado dinámicamente para evitar problemas de renderizado de strings
-    html_template = """
-    <!DOCTYPE html>
-    <html lang="es">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <meta http-equiv="refresh" content="10">
-        <title>GurdianCripto Quantum Pro</title>
-        <style>
-            body { font-family: -apple-system, sans-serif; background: #0b0e11; color: #eaecef; margin: 0; padding: 10px; }
-            .kpi-container { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 15px; }
-            .kpi-card { background: #1e2329; padding: 12px; border-radius: 8px; text-align: center; border-left: 4px solid #f0b90b; }
-            .kpi-value { font-size: 20px; font-weight: bold; color: #fff; margin-top: 4px; }
-            .mode-badge { background: {{ 'red' if mode == 'REAL' else 'green' }}; color: white; padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; display: inline-block; margin-bottom: 10px; }
-            .trade-card { background: #1e2329; margin-bottom: 10px; padding: 12px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.5); }
-            .status-ABIERTA { color: #f0b90b; font-weight: bold; }
-            .status-GANADA { color: #0ecb81; font-weight: bold; }
-            .status-PERDIDA { color: #f6465d; font-weight: bold; }
+    url = f"{BINANCE_FUTURES_URL}/fapi/v1/klines"
+    res = requests.get(url, params={"symbol": symbol, "interval": "15m", "limit": 1000}, timeout=10)
+    if res.status_code != 200: return jsonify({"error": "Error de descarga"}), 400
+        
+    klines = res.json()
+    precios = np.array([float(k[4]) for k in klines])
+    vols = np.array([float(k[5]) for k in klines])
+    highs = np.array([float(k[2]) for k in klines])
+    lows = np.array([float(k[3]) for k in klines])
+    
+    ganadas, perdidas = 0, 0
+    en_posicion = False
+    tipo, entrada, tp, sl = "", 0.0, 0.0, 0.0
+    
+    for i in range(20, len(precios) - 1):
+        close = precios[i]
+        if not en_posicion:
+            ma = np.mean(precios[i-20:i])
+            std = np.std(precios[i-20:i])
+            z = (vols[i] - np.mean(vols[i-20:i])) / (np.std(vols[i-20:i]) or 1)
+            atr = np.mean(highs[i-14:i] - lows[i-14:i])
+            
+            if close >= (ma + 2*std) and z > 1.5:
+                en_posicion, tipo, entrada, tp, sl = True, "LONG", close, close + 3*atr, close - 1.5*atr
+            elif close <= (ma - 2*std) and z > 1.5:
+                en_posicion, tipo, entrada, tp, sl = True, "SHORT", close, close - 3*atr, close + 3*atr
+        else:
+            if tipo == "LONG":
+                if highs[i] >= tp: ganadas += 1; en_posicion = False
+                elif lows[i] <= sl: perdidas += 1; en_posicion = False
+            else:
