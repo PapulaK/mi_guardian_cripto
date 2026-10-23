@@ -84,31 +84,28 @@ def enviar_orden_binance(symbol, side, quantity):
 def procesar_logica_cuantitativa():
     """Descarga datos actuales, calcula indicadores y toma decisiones autónomas."""
     try:
-        # 1. Obtener Klines de 15m para el activo principal
         url = f"{BINANCE_FUTURES_URL}/fapi/v1/klines"
         params = {"symbol": ACTIVO_PRINCIPAL, "interval": "15m", "limit": 100}
         res = requests.get(url, params=params, timeout=8)
         if res.status_code != 200: return
         
         klines = res.json()
-        precios_cierre = np.array([float(k[4]) for k in klines])
-        volumenes = np.array([float(k[5]) for k in klines])
-        highs = np.array([float(k[2]) for k in klines])
-        lows = np.array([float(k[3]) for k in klines])
+        precios_cierre = np.array([float(k) for k in klines])
+        volumenes = np.array([float(k) for k in klines])
+        highs = np.array([float(k) for k in klines])
+        lows = np.array([float(k) for k in klines])
         
         close_actual = precios_cierre[-1]
         vol_actual = volumenes[-1]
         
-        # 2. Obtener macro tendencia Beta de Bitcoin (BTC 1H contra su MA20)
         params_btc = {"symbol": "BTCUSDT", "interval": "1h", "limit": 21}
         res_btc = requests.get(url, params=params_btc, timeout=8)
         btc_alcista = True
         if res_btc.status_code == 200:
             klines_btc = res_btc.json()
-            cierres_btc = np.array([float(k[4]) for k in klines_btc])
+            cierres_btc = np.array([float(k) for k in klines_btc])
             btc_alcista = cierres_btc[-1] > np.mean(cierres_btc[:-1])
 
-        # 3. Cálculos Estadísticos Avanzados (Bollinger, Z-Score, ATR)
         ma20 = np.mean(precios_cierre[-21:-1])
         std20 = np.std(precios_cierre[-21:-1])
         banda_sup = ma20 + (2.0 * std20)
@@ -120,31 +117,26 @@ def procesar_logica_cuantitativa():
         
         atr_14 = np.mean(highs[-15:-1] - lows[-15:-1])
 
-        # 4. Auditoría de Estados y Verificación de Operaciones en DB
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("SELECT id, tipo_posicion, precio_entrada, tp_precio, sl_precio FROM operaciones WHERE estado='ABIERTA' AND symbol=?", (ACTIVO_PRINCIPAL,))
         posicion_activa = cursor.fetchone()
         
         if not posicion_activa:
-            # LÓGICA DE ENTRADA CON CONFIRMACIÓN MACRO BETA
             if close_actual >= banda_sup and z_score_vol > 1.5 and btc_alcista:
-                # Disparar LONG
                 tp = close_actual + (3.0 * atr_14)
                 sl = close_actual - (1.5 * atr_14)
-                enviar_orden_binance(ACTIVO_PRINCIPAL, "BUY", 1.0) # Ajustar cantidad según riesgo
+                enviar_orden_binance(ACTIVO_PRINCIPAL, "BUY", 1.0)
                 cursor.execute("INSERT INTO operaciones (symbol, tipo_posicion, precio_entrada, tp_precio, sl_precio, estado, timestamp) VALUES (?, 'LONG', ?, ?, ?, 'ABIERTA', ?)",
                                (ACTIVO_PRINCIPAL, close_actual, tp, sl, int(time.time())))
                 
             elif close_actual <= banda_inf and z_score_vol > 1.5 and not btc_alcista:
-                # Disparar SHORT
                 tp = close_actual - (3.0 * atr_14)
                 sl = close_actual + (1.5 * atr_14)
                 enviar_orden_binance(ACTIVO_PRINCIPAL, "SELL", 1.0)
                 cursor.execute("INSERT INTO operaciones (symbol, tipo_posicion, precio_entrada, tp_precio, sl_precio, estado, timestamp) VALUES (?, 'SHORT', ?, ?, ?, 'ABIERTA', ?)",
                                (ACTIVO_PRINCIPAL, close_actual, tp, sl, int(time.time())))
         else:
-            # LÓGICA ROBÓTICA DE SALIDA (AUDITORÍA DE PRECIO SPOT CONTRA OBJETIVOS)
             id_op, tipo, entrada, tp, sl = posicion_activa
             if tipo == "LONG":
                 if close_actual >= tp:
@@ -174,14 +166,13 @@ def background_loop_perpetuo():
     print("🤖 Servomotor Cuantitativo de Fondo Iniciado Correctamente.")
     while True:
         procesar_logica_cuantitativa()
-        time.sleep(10) # Intervalo estricto de escaneo y auditoría
+        time.sleep(10)
 
-# Lanzamiento seguro del hilo de fondo antes de levantar la interfaz web
 t = threading.Thread(target=background_loop_perpetuo, daemon=True)
 t.start()
 
 # =====================================================================
-# 📊 MOTOR DE BACKTESTING HISTÓRICO INTEGRADO
+# 🧮 MOTOR DE BACKTESTING HISTÓRICO INTEGRADO
 # =====================================================================
 @app.route('/api/backtest', methods=['POST'])
 def ejecutar_backtest():
@@ -191,13 +182,14 @@ def ejecutar_backtest():
     
     url = f"{BINANCE_FUTURES_URL}/fapi/v1/klines"
     res = requests.get(url, params={"symbol": symbol, "interval": "15m", "limit": 1000}, timeout=10)
-    if res.status_code != 200: return jsonify({"error": "Error de descarga"}), 400
+    if res.status_code != 200: 
+        return jsonify({"error": "Error de descarga"}), 400
         
     klines = res.json()
-    precios = np.array([float(k[4]) for k in klines])
-    vols = np.array([float(k[5]) for k in klines])
-    highs = np.array([float(k[2]) for k in klines])
-    lows = np.array([float(k[3]) for k in klines])
+    precios = np.array([float(k) for k in klines])
+    vols = np.array([float(k) for k in klines])
+    highs = np.array([float(k) for k in klines])
+    lows = np.array([float(k) for k in klines])
     
     ganadas, perdidas = 0, 0
     en_posicion = False
@@ -217,6 +209,24 @@ def ejecutar_backtest():
                 en_posicion, tipo, entrada, tp, sl = True, "SHORT", close, close - 3*atr, close + 3*atr
         else:
             if tipo == "LONG":
-                if highs[i] >= tp: ganadas += 1; en_posicion = False
-                elif lows[i] <= sl: perdidas += 1; en_posicion = False
-            else:
+                if highs[i] >= tp: 
+                    ganadas += 1
+                    en_posicion = False
+                elif lows[i] <= sl: 
+                    perdidas += 1
+                    en_posicion = False
+            elif tipo == "SHORT":
+                if lows[i] <= tp: 
+                    ganadas += 1
+                    en_posicion = False
+                elif highs[i] >= sl: 
+                    perdidas += 1
+                    en_posicion = False
+
+    total = ganadas + perdidas
+    wr = (ganadas / total * 100) if total > 0 else 0
+    return jsonify({"status": "SUCCESS", "activo": symbol, "operaciones": total, "win_rate": f"{round(wr, 2)}%"})
+
+# =====================================================================
+# 📱 PANEL DE INSTRUMENTACIÓN PREMIUM (WEB)
+# =====================================================================
