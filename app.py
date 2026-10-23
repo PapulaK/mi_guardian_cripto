@@ -9,7 +9,8 @@ from flask import Flask, render_template_string, request, redirect, url_for, ses
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "quantum_institutional_ultra_v9_trend_aligned")
 
-DB_FILE = "estadisticas_trading.db"
+# 🔒 RUTA DE ESCRITURA SEGURA: Se mueve a /tmp para evitar que Render bloquee Gunicorn por falta de permisos
+DB_FILE = "/tmp/estadisticas_trading.db"
 
 def inicializar_db():
     try:
@@ -64,13 +65,13 @@ def obtener_metricas_globales():
         cursor = conn.cursor()
         
         cursor.execute("SELECT COUNT(*) FROM señales WHERE estado_operacion = 'GANADA'")
-        ganadas = cursor.fetchone() or 0
+        ganadas = cursor.fetchone()[0] if cursor.execute("SELECT COUNT(*) FROM señales WHERE estado_operacion = 'GANADA'") else 0
         
         cursor.execute("SELECT COUNT(*) FROM señales WHERE estado_operacion = 'PERDIDA'")
-        perdidas = cursor.fetchone() or 0
+        perdidas = cursor.fetchone()[0] if cursor.execute("SELECT COUNT(*) FROM señales WHERE estado_operacion = 'PERDIDA'") else 0
         
         cursor.execute("SELECT COUNT(*) FROM señales WHERE estado_operacion = 'ABIERTA'")
-        abiertas = cursor.fetchone() or 0
+        abiertas = cursor.fetchone()[0] if cursor.execute("SELECT COUNT(*) FROM señales WHERE estado_operacion = 'ABIERTA'") else 0
         
         total_cerradas = ganadas + perdidas
         win_rate = (ganadas / total_cerradas * 100) if total_cerradas > 0 else 0.0
@@ -78,7 +79,7 @@ def obtener_metricas_globales():
         
         return {
             "ganadas": ganadas, "perdidas": perdidas, "abiertas": abiertas,
-            "win_rate": f"{win_rate:.1f}%", "profit_factor": f"{profit_factor:.2f}" if perdidas > 0 else "N/A"
+            "win_rate": f"{win_rate:.1f}%", "profit_factor": f"{profit_factor:.2f}" if perdidas > 0 else "0.00"
         }
     except Exception as e:
         print(f"Error Métricas: {e}")
@@ -228,8 +229,3 @@ def analizar_moneda_tiempo_real(moneda, macro_btc):
                 estado_calculado = f"🟡 PRE-RANG BAJO ({distancia_piso:.2f}%)"
         
         return {
-            "estado": estado_calculado, "precio": precio_str,
-            "tp": f"${tp_final:.2f}" if label in ['ETH', 'BTC'] else f"${tp_final:.4f}",
-            "sl": f"${sl_final:.2f}" if label in ['ETH', 'BTC'] else f"${sl_final:.4f}",
-            "fecha": datetime.now().strftime('%H:%M:%S'),
-            "zscore": f"{zscore_actual:+.2f} SD",
