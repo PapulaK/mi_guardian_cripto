@@ -1,241 +1,102 @@
-import os
-import time
-import hmac
-import hashlib
-import sqlite3
-import requests
-import threading
-import numpy as np
-from flask import Flask, jsonify, request, render_template_string
-from urllib.parse import urlencode
+# --- INTERFAZ PREMIUM DE BAJA LATENCIA PARA MÓVILES CON MANUAL INTEGRADO ---
+async def http_html_dashboard(request):
+    op_activa_html = "<p style='color:#ffbc00; font-weight:700; margin:0;'>⚠️ EN ESPERA DE ANOMALÍAS DE LIQUIDEZ</p>"
+    if ENGINE_STATE["operacion_activa"]:
+        op = ENGINE_STATE["operacion_activa"]
+        op_activa_html = f"""
+        <div style="background:#092115; padding:14px; border-radius:6px; border-left:4px solid #10b981;">
+            <p style="margin:4px 0;"><strong>POSICIÓN:</strong> <span style="color:#10b981;">{op['tipo']}</span></p>
+            <p style="margin:4px 0;"><strong>ENTRADA:</strong> {op['entrada']:.4f}</p>
+            <p style="margin:4px 0; color:#10b981;"><strong>TAKE PROFIT:</strong> {op['tp']:.4f}</p>
+            <p style="margin:4px 0; color:#ef4444;"><strong>STOP LOSS:</strong> {op['sl']:.4f}</p>
+        </div>
+        """
 
-app = Flask(__name__)
-
-# =====================================================================
-# ⚙️ CONFIGURACIÓN DE ENTORNO Y CONTEXTO DEL SISTEMA
-# =====================================================================
-BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY", "")
-BINANCE_SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY", "")
-TRADING_MODE = os.environ.get("TRADING_MODE", "PAPER")
-ACTIVO_PRINCIPAL = os.environ.get("ACTIVO_PRINCIPAL", "SOLUSDT").upper()
-
-BINANCE_FUTURES_URL = "https://binance.com"
-DB_PATH = "/tmp/estadisticas_trading.db"
-
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS operaciones (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            symbol TEXT,
-            tipo_posicion TEXT,
-            precio_entrada REAL,
-            tp_precio REAL,
-            sl_precio REAL,
-            estado TEXT,
-            timestamp INTEGER
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-try:
-    init_db()
-except Exception as e:
-    print(f"Error inicializando DB: {e}")
-
-# =====================================================================
-# 🔑 MÓDULO DE FIRMA CRIPTO-SEGURA (API BINANCE)
-# =====================================================================
-def firmar_peticion(params):
-    query_string = urlencode(params)
-    return hmac.new(
-        BINANCE_SECRET_KEY.encode('utf-8'),
-        query_string.encode('utf-8'),
-        hashlib.sha256
-    ).hexdigest()
-
-def enviar_orden_binance(symbol, side, quantity):
-    if TRADING_MODE != "REAL":
-        return {"status": "SUCCESS_PAPER", "orderId": f"mock_{int(time.time())}"}
-        
-    endpoint = f"{BINANCE_FUTURES_URL}/fapi/v1/order"
-    params = {
-        "symbol": symbol.upper(),
-        "side": side.upper(),
-        "type": "MARKET",
-        "quantity": quantity,
-        "timestamp": int(time.time() * 1000),
-        "recvWindow": 6000
-    }
-    params["signature"] = firmar_peticion(params)
-    headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
-    
-    try:
-        response = requests.post(endpoint, data=params, headers=headers, timeout=10)
-        return response.json()
-    except Exception as e:
-        return {"status": "ERROR", "msg": str(e)}
-
-# =====================================================================
-# 🧮 MOTOR CUANTITATIVO 9.2 EN TIEMPO REAL (EXTRACCIÓN QUIRÚRGICA)
-# =====================================================================
-def procesar_logica_cuantitativa():
-    try:
-        url = f"{BINANCE_FUTURES_URL}/fapi/v1/klines"
-        params = {"symbol": ACTIVO_PRINCIPAL, "interval": "15m", "limit": 100}
-        res = requests.get(url, params=params, timeout=8)
-        if res.status_code != 200: return
-        
-        klines = res.json()
-        
-        # Corrección: Extraer el índice correspondiente de la sublista de Binance
-        precios_cierre = np.array([float(k[4]) for k in klines])
-        volumenes = np.array([float(k[5]) for k in klines])
-        highs = np.array([float(k[2]) for k in klines])
-        lows = np.array([float(k[3]) for k in klines])
-        
-        close_actual = precios_cierre[-1]
-        vol_actual = volumenes[-1]
-        
-        params_btc = {"symbol": "BTCUSDT", "interval": "1h", "limit": 21}
-        res_btc = requests.get(url, params=params_btc, timeout=8)
-        btc_alcista = True
-        if res_btc.status_code == 200:
-            klines_btc = res_btc.json()
-            cierres_btc = np.array([float(k[4]) for k in klines_btc])
-            btc_alcista = cierres_btc[-1] > np.mean(cierres_btc[:-1])
-
-        ma20 = np.mean(precios_cierre[-21:-1])
-        std20 = np.std(precios_cierre[-21:-1])
-        banda_sup = ma20 + (2.0 * std20)
-        banda_inf = ma20 - (2.0 * std20)
-        
-        ma_vol = np.mean(volumenes[-21:-1])
-        std_vol = np.std(volumenes[-21:-1])
-        z_score_vol = (vol_actual - ma_vol) / std_vol if std_vol > 0 else 0
-        
-        atr_14 = np.mean(highs[-15:-1] - lows[-15:-1])
-
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, tipo_posicion, precio_entrada, tp_precio, sl_precio FROM operaciones WHERE estado='ABIERTA' AND symbol=?", (ACTIVO_PRINCIPAL,))
-        posicion_activa = cursor.fetchone()
-        
-        if not posicion_activa:
-            if close_actual >= banda_sup and z_score_vol > 1.5 and btc_alcista:
-                tp = close_actual + (3.0 * atr_14)
-                sl = close_actual - (1.5 * atr_14)
-                enviar_orden_binance(ACTIVO_PRINCIPAL, "BUY", 1.0)
-                cursor.execute("INSERT INTO operaciones (symbol, tipo_posicion, precio_entrada, tp_precio, sl_precio, estado, timestamp) VALUES (?, 'LONG', ?, ?, ?, 'ABIERTA', ?)",
-                               (ACTIVO_PRINCIPAL, close_actual, tp, sl, int(time.time())))
-                
-            elif close_actual <= banda_inf and z_score_vol > 1.5 and not btc_alcista:
-                tp = close_actual - (3.0 * atr_14)
-                sl = close_actual + (1.5 * atr_14)
-                enviar_orden_binance(ACTIVO_PRINCIPAL, "SELL", 1.0)
-                cursor.execute("INSERT INTO operaciones (symbol, tipo_posicion, precio_entrada, tp_precio, sl_precio, estado, timestamp) VALUES (?, 'SHORT', ?, ?, ?, 'ABIERTA', ?)",
-                               (ACTIVO_PRINCIPAL, close_actual, tp, sl, int(time.time())))
-        else:
-            id_op, tipo, entrada, tp, sl = posicion_activa
-            if tipo == "LONG":
-                if close_actual >= tp:
-                    enviar_orden_binance(ACTIVO_PRINCIPAL, "SELL", 1.0)
-                    cursor.execute("UPDATE operaciones SET estado='GANADA' WHERE id=?", (id_op,))
-                elif close_actual <= sl:
-                    enviar_orden_binance(ACTIVO_PRINCIPAL, "SELL", 1.0)
-                    cursor.execute("UPDATE operaciones SET estado='PERDIDA' WHERE id=?", (id_op,))
-            elif tipo == "SHORT":
-                if close_actual <= tp:
-                    enviar_orden_binance(ACTIVO_PRINCIPAL, "BUY", 1.0)
-                    cursor.execute("UPDATE operaciones SET estado='GANADA' WHERE id=?", (id_op,))
-                elif close_actual >= sl:
-                    enviar_orden_binance(ACTIVO_PRINCIPAL, "BUY", 1.0)
-                    cursor.execute("UPDATE operaciones SET estado='PERDIDA' WHERE id=?", (id_op,))
-                    
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"Error en bucle cuantitativo: {e}")
-
-# =====================================================================
-# 🔁 DEMONIO ASÍNCRONO DE FONDO CON ARRANQUE SEGURO
-# =====================================================================
-def background_loop_perpetuo():
-    print("🤖 Esperando estabilización de red de Flask (Safe Boot)...")
-    time.sleep(5)
-    print("🤖 Servomotor Cuantitativo de Fondo Activado.")
-    while True:
-        procesar_logica_cuantitativa()
-        time.sleep(10)
-
-t = threading.Thread(target=background_loop_perpetuo, daemon=True)
-t.start()
-
-# =====================================================================
-# 🧮 MOTOR DE BACKTESTING HISTÓRICO INTEGRADO
-# =====================================================================
-@app.route('/api/backtest', methods=['POST'])
-def ejecutar_backtest():
-    data = request.get_json() or {}
-    symbol = data.get("symbol", ACTIVO_PRINCIPAL).upper()
-    capital_inicial = float(data.get("capital", 1000.0))
-    
-    url = f"{BINANCE_FUTURES_URL}/fapi/v1/klines"
-    res = requests.get(url, params={"symbol": symbol, "interval": "15m", "limit": 1000}, timeout=10)
-    if res.status_code != 200: 
-        return jsonify({"error": "Error de descarga"}), 400
-        
-    klines = res.json()
-    precios = np.array([float(k[4]) for k in klines])
-    vols = np.array([float(k[5]) for k in klines])
-    highs = np.array([float(k[2]) for k in klines])
-    lows = np.array([float(k[3]) for k in klines])
-    
-    ganadas, perdidas = 0, 0
-    en_posicion = False
-    tipo, entrada, tp, sl = "", 0.0, 0.0, 0.0
-    
-    for i in range(20, len(precios) - 1):
-        close = precios[i]
-        if not en_posicion:
-            ma = np.mean(precios[i-20:i])
-            std = np.std(precios[i-20:i])
-            z = (vols[i] - np.mean(vols[i-20:i])) / (np.std(vols[i-20:i]) or 1)
-            atr = np.mean(highs[i-14:i] - lows[i-14:i])
-            
-            if close >= (ma + 2*std) and z > 1.5:
-                en_posicion, tipo, entrada, tp, sl = True, "LONG", close, close + 3*atr, close - 1.5*atr
-            elif close <= (ma - 2*std) and z > 1.5:
-                en_posicion, tipo, entrada, tp, sl = True, "SHORT", close, close - 3*atr, close + 3*atr
-        else:
-            if tipo == "LONG":
-                if highs[i] >= tp: 
-                    ganadas += 1
-                    en_posicion = False
-                elif lows[i] <= sl: 
-                    perdidas += 1
-                    en_posicion = False
-            elif tipo == "SHORT":
-                if lows[i] <= tp: 
-                    ganadas += 1
-                    en_posicion = False
-                elif highs[i] >= sl: 
-                    perdidas += 1
-                    en_posicion = False
-
-    total = ganadas + perdidas
-    wr = (ganadas / total * 100) if total > 0 else 0
-    return jsonify({"status": "SUCCESS", "activo": symbol, "operaciones": total, "win_rate": f"{round(wr, 2)}%"})
-
-# =====================================================================
-# 📱 PANEL DE INSTRUMENTACIÓN PREMIUM (WEB)
-# =====================================================================
-@app.route('/')
-def dashboard():
-    rows = []
-    ganadas, perdidas, activas = 0, 0, 0
-    win_rate, profit_factor = 0.0, 0.0
-    
-    try:
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="es">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+        <title>MATRIX ULTRALOW V5</title>
+        <style>
+            body {{ background-color: #040406; color: #f4f4f5; font-family: -apple-system, system-ui, sans-serif; margin: 0; padding: 12px; }}
+            .card {{ background: #0b0b0e; border: 1px solid #18181b; padding: 14px; border-radius: 10px; margin-bottom: 12px; }}
+            .header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #18181b; padding-bottom: 8px; }}
+            .title {{ font-size: 15px; font-weight: 800; color: #10b981; letter-spacing: 0.5px; }}
+            .metric {{ font-size: 28px; font-weight: 800; color: #ffffff; margin-top: 4px; }}
+            .label {{ font-size: 11px; color: #71717a; text-transform: uppercase; font-weight: 600; }}
+            select {{ width: 100%; padding: 12px; background: #121217; border: 1px solid #27272a; color: white; border-radius: 6px; font-size: 15px; font-weight: bold; }}
+            .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }}
+            .indicator-val {{ font-size: 18px; font-weight: 700; margin-top: 4px; }}
+            .manual {{ font-size: 12px; color: #a1a1aa; line-height: 1.6; margin: 0; }}
+            .manual strong {{ color: #ffffff; }}
+        </style>
+        <script>
+            setInterval(() => {{ fetch('/api/state').then(r => r.json()).then(data => {{
+                document.getElementById('price').innerText = data.precio_spot.toFixed(4);
+                document.getElementById('vpin').innerText = (data.vpin_actual * 100).toFixed(1) + '%';
+                document.getElementById('zscore').innerText = data.z_score_retornos.toFixed(2);
+                document.getElementById('spread').innerText = data.orderbook_spread.toFixed(5);
+                document.getElementById('clock').innerText = data.last_update;
+                if(data.vpin_actual > 0.65) {{ document.getElementById('vpin').style.color = '#10b981'; }}
+                else {{ document.getElementById('vpin').style.color = '#3b82f6'; }}
+            }}); }}, 300);
+            function cambiarAltcoin(sel) {{
+                fetch('/api/switch?symbol=' + sel.value, {{ method: 'POST' }}).then(() => window.location.reload());
+            }}
+        </script>
+    </head>
+    <body>
+        <div class="header">
+            <div class="title">⚡ MATRIX PURE HFT V5</div>
+            <div id="clock" style="font-size:11px; color:#52525b;">{ENGINE_STATE["last_update"]}</div>
+        </div>
+        <p></p>
+        <div class="card">
+            <span class="label">Inyección RAM de Altcoin Activa</span>
+            <p></p>
+            <select onchange="cambiarAltcoin(this)">
+                <option value="SOLUSDT" {"selected" if ENGINE_STATE["activo_actual"]=="SOLUSDT" else ""}>SOL / USDT (Solana)</option>
+                <option value="BTCUSDT" {"selected" if ENGINE_STATE["activo_actual"]=="BTCUSDT" else ""}>BTC / USDT (Bitcoin)</option>
+                <option value="ETHUSDT" {"selected" if ENGINE_STATE["activo_actual"]=="ETHUSDT" else ""}>ETH / USDT (Ethereum)</option>
+                <option value="XRPUSDT" {"selected" if ENGINE_STATE["activo_actual"]=="XRPUSDT" else ""}>XRP / USDT (Ripple)</option>
+            </select>
+        </div>
+        <div class="card">
+            <span class="label">Precio Spot</span>
+            <div class="metric" id="price">{ENGINE_STATE["precio_spot"]:.4f}</div>
+        </div>
+        <div class="grid">
+            <div class="card">
+                <span class="label">Desequilibrio VPIN</span>
+                <div class="indicator-val" id="vpin">{(ENGINE_STATE["vpin_actual"] * 100):.1f}%</div>
+            </div>
+            <div class="card">
+                <span class="label">Z-Score Retornos</span>
+                <div class="indicator-val" id="zscore">{ENGINE_STATE["z_score_retornos"]:.2f}</div>
+            </div>
+        </div>
+        <div class="card">
+            <span class="label">Spread de Orderbook Líquido</span>
+            <div style="font-size:15px; font-weight:bold; margin-top:2px;" id="spread">{ENGINE_STATE["orderbook_spread"]:.5f}</div>
+        </div>
+        <div class="card">
+            <span class="label">Matriz HFT - Flujo de Órdenes</span>
+            <p></p>
+            <div id="posicion-contenedor">{op_activa_html}</div>
+        </div>
+        <!-- MANUAL DE AYUDA INTEGRADO OPTIMIZADO PARA BAJA LATENCIA -->
+        <div class="card">
+            <span class="label" style="color: #10b981;">📖 Manual de Operación V5-HFT</span>
+            <p></p>
+            <p class="manual">
+                <strong>Desequilibrio VPIN (>65%):</strong> Mide la toxicidad del flujo y la presión de órdenes en bloques cortos. Si sube de golpe, predice ráfagas institucionales inminentes.<br><br>
+                <strong>Z-Score Retornos (>1.8 / <-1.8):</strong> Identifica anomalías estadísticas en el rendimiento logarítmico del precio. Valida volatilidad pura descartando movimientos lentos o laterales.<br><br>
+                <strong>Estructura Transicional:</strong> Al cambiar de Altcoin en el menú, el motor limpia instantáneamente la RAM en microsegundos (`O(1)`) y reconecta el pipeline de streams de Binance sin dejar basura de datos en memoria.
+            </p>
+        </div>
+    </body>
+    </html>
+    """
+    return web.Response(text=html_content, content_type='text/html')
