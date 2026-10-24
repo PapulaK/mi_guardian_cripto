@@ -16,14 +16,13 @@ app = Flask(__name__)
 # =====================================================================
 BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY", "")
 BINANCE_SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY", "")
-TRADING_MODE = os.environ.get("TRADING_MODE", "PAPER")  # 'PAPER' o 'REAL'
+TRADING_MODE = os.environ.get("TRADING_MODE", "PAPER")
 ACTIVO_PRINCIPAL = os.environ.get("ACTIVO_PRINCIPAL", "SOLUSDT").upper()
 
 BINANCE_FUTURES_URL = "https://binance.com"
 DB_PATH = "/tmp/estadisticas_trading.db"
 
 def init_db():
-    """Inicializa la base de datos local de alta velocidad en memoria temporal."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
@@ -41,13 +40,15 @@ def init_db():
     conn.commit()
     conn.close()
 
-init_db()
+try:
+    init_db()
+except Exception as e:
+    print(f"Error inicializando DB: {e}")
 
 # =====================================================================
 # 🔑 MÓDULO DE FIRMA CRIPTO-SEGURA (API BINANCE)
 # =====================================================================
 def firmar_peticion(params):
-    """Genera la firma digital HMAC-SHA256 obligatoria para peticiones privadas."""
     query_string = urlencode(params)
     return hmac.new(
         BINANCE_SECRET_KEY.encode('utf-8'),
@@ -56,14 +57,13 @@ def firmar_peticion(params):
     ).hexdigest()
 
 def enviar_orden_binance(symbol, side, quantity):
-    """Ejecuta una orden de mercado real en Binance Futuros."""
     if TRADING_MODE != "REAL":
         return {"status": "SUCCESS_PAPER", "orderId": f"mock_{int(time.time())}"}
         
     endpoint = f"{BINANCE_FUTURES_URL}/fapi/v1/order"
     params = {
         "symbol": symbol.upper(),
-        "side": side.upper(),       # 'BUY' o 'SELL'
+        "side": side.upper(),
         "type": "MARKET",
         "quantity": quantity,
         "timestamp": int(time.time() * 1000),
@@ -79,10 +79,9 @@ def enviar_orden_binance(symbol, side, quantity):
         return {"status": "ERROR", "msg": str(e)}
 
 # =====================================================================
-# 🧮 MOTOR CUANTITATIVO 9.2 EN TIEMPO REAL (HISTORAL COMPLETO)
+# 🧮 MOTOR CUANTITATIVO 9.2 EN TIEMPO REAL (EXTRACCIÓN QUIRÚRGICA)
 # =====================================================================
 def procesar_logica_cuantitativa():
-    """Descarga datos actuales, calcula indicadores y toma decisiones autónomas."""
     try:
         url = f"{BINANCE_FUTURES_URL}/fapi/v1/klines"
         params = {"symbol": ACTIVO_PRINCIPAL, "interval": "15m", "limit": 100}
@@ -90,10 +89,12 @@ def procesar_logica_cuantitativa():
         if res.status_code != 200: return
         
         klines = res.json()
-        precios_cierre = np.array([float(k) for k in klines])
-        volumenes = np.array([float(k) for k in klines])
-        highs = np.array([float(k) for k in klines])
-        lows = np.array([float(k) for k in klines])
+        
+        # Corrección: Extraer el índice correspondiente de la sublista de Binance
+        precios_cierre = np.array([float(k[4]) for k in klines])
+        volumenes = np.array([float(k[5]) for k in klines])
+        highs = np.array([float(k[2]) for k in klines])
+        lows = np.array([float(k[3]) for k in klines])
         
         close_actual = precios_cierre[-1]
         vol_actual = volumenes[-1]
@@ -103,7 +104,7 @@ def procesar_logica_cuantitativa():
         btc_alcista = True
         if res_btc.status_code == 200:
             klines_btc = res_btc.json()
-            cierres_btc = np.array([float(k) for k in klines_btc])
+            cierres_btc = np.array([float(k[4]) for k in klines_btc])
             btc_alcista = cierres_btc[-1] > np.mean(cierres_btc[:-1])
 
         ma20 = np.mean(precios_cierre[-21:-1])
@@ -159,11 +160,12 @@ def procesar_logica_cuantitativa():
         print(f"Error en bucle cuantitativo: {e}")
 
 # =====================================================================
-# 🔁 DEMONIO ASÍNCRONO DE FONDO (DAEMON THREAD PERPETUO)
+# 🔁 DEMONIO ASÍNCRONO DE FONDO CON ARRANQUE SEGURO
 # =====================================================================
 def background_loop_perpetuo():
-    """Corre de forma autónoma e independiente en el servidor de Render."""
-    print("🤖 Servomotor Cuantitativo de Fondo Iniciado Correctamente.")
+    print("🤖 Esperando estabilización de red de Flask (Safe Boot)...")
+    time.sleep(5)
+    print("🤖 Servomotor Cuantitativo de Fondo Activado.")
     while True:
         procesar_logica_cuantitativa()
         time.sleep(10)
@@ -186,10 +188,10 @@ def ejecutar_backtest():
         return jsonify({"error": "Error de descarga"}), 400
         
     klines = res.json()
-    precios = np.array([float(k) for k in klines])
-    vols = np.array([float(k) for k in klines])
-    highs = np.array([float(k) for k in klines])
-    lows = np.array([float(k) for k in klines])
+    precios = np.array([float(k[4]) for k in klines])
+    vols = np.array([float(k[5]) for k in klines])
+    highs = np.array([float(k[2]) for k in klines])
+    lows = np.array([float(k[3]) for k in klines])
     
     ganadas, perdidas = 0, 0
     en_posicion = False
@@ -230,3 +232,10 @@ def ejecutar_backtest():
 # =====================================================================
 # 📱 PANEL DE INSTRUMENTACIÓN PREMIUM (WEB)
 # =====================================================================
+@app.route('/')
+def dashboard():
+    rows = []
+    ganadas, perdidas, activas = 0, 0, 0
+    win_rate, profit_factor = 0.0, 0.0
+    
+    try:
